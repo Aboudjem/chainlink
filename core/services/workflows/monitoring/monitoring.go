@@ -19,6 +19,7 @@ type EngineMetrics struct {
 	registerTriggerFailureCounter            metric.Int64Counter
 	triggerWorkflowStarterErrorCounter       metric.Int64Counter
 	workflowsRunningGauge                    metric.Int64Gauge
+	workflowDONConfigVersionGauge            metric.Int64Gauge
 	capabilityInvocationCounter              metric.Int64Counter
 	capabilityFailureCounter                 metric.Int64Counter
 	workflowRegisteredCounter                metric.Int64Counter
@@ -151,6 +152,13 @@ func InitMonitoringResources() (em *EngineMetrics, err error) {
 	em.workflowExecutionSucceededCounter, err = beholder.GetMeter().Int64Counter("platform_engine_workflow_execution_succeeded_count")
 	if err != nil {
 		return nil, fmt.Errorf("failed to register workflow execution succeeded counter: %w", err)
+	}
+
+	em.workflowDONConfigVersionGauge, err = beholder.GetMeter().Int64Gauge("platform_engine_workflow_config_count",
+		metric.WithDescription("The current workflow DON configuration count for each active workflow engine."),
+		metric.WithUnit("count"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to register workflow DON config count gauge: %w", err)
 	}
 
 	// Deprecated: use the gauge below
@@ -337,6 +345,11 @@ func (c WorkflowsMetricLabeler) IncrementTotalWorkflowStepErrorsCounter(ctx cont
 func (c WorkflowsMetricLabeler) UpdateTotalWorkflowsGauge(ctx context.Context, val int64) {
 	otelLabels := beholder.OtelAttributes(c.Labels).AsStringAttributes()
 	c.em.workflowsRunningGauge.Record(ctx, val, metric.WithAttributes(otelLabels...))
+}
+
+func (c WorkflowsMetricLabeler) UpdateWorkflowDONConfigVersionGauge(ctx context.Context, val uint32) {
+	otelLabels := beholder.OtelAttributes(c.Labels).AsStringAttributes()
+	c.em.workflowDONConfigVersionGauge.Record(ctx, int64(val), metric.WithAttributes(otelLabels...))
 }
 
 func (c WorkflowsMetricLabeler) IncrementEngineHeartbeatCounter(ctx context.Context) {

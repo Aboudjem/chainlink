@@ -135,6 +135,7 @@ func NewEngine(cfg *EngineConfig) (*Engine, error) {
 		meterReports:            metering.NewReports(cfg.BillingClient, cfg.WorkflowOwner, cfg.WorkflowID, beholderLogger, labelsMap, metricsLabeler, cfg.WorkflowRegistryAddress, cfg.WorkflowRegistryChainSelector, metering.EngineVersionV2),
 		metrics:                 metricsLabeler,
 	}
+	engine.metrics.UpdateWorkflowDONConfigVersionGauge(ctx, localNode.WorkflowDON.ConfigVersion)
 	engine.loggerLabels.Store(&labelsMap)
 	engine.localNode.Store(&localNode)
 	engine.Service, engine.srvcEng = services.Config{
@@ -239,6 +240,7 @@ func (e *Engine) localNodeSync(ctx context.Context) {
 		"Workflow DON Families", localNode.WorkflowDON.Families,
 		"Workflow DON Config Version", localNode.WorkflowDON.ConfigVersion,
 	)
+	e.metrics.UpdateWorkflowDONConfigVersionGauge(ctx, localNode.WorkflowDON.ConfigVersion)
 	e.cfg.Hooks.OnNodeSynced(localNode, nil)
 	e.localNode.Store(&localNode)
 }
