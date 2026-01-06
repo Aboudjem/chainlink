@@ -9,8 +9,11 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+
 	"github.com/smartcontractkit/libocr/ragep2p"
 	ragetypes "github.com/smartcontractkit/libocr/ragep2p/types"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/registry"
@@ -46,18 +49,19 @@ var defaultStreamConfig = p2ptypes.StreamConfig{
 
 type launcher struct {
 	services.StateMachine
-	lggr                logger.Logger
-	myPeerID            p2ptypes.PeerID
-	peerWrapper         p2ptypes.PeerWrapper
-	dispatcher          remotetypes.Dispatcher
-	cachedShims         cachedShims
-	registry            *Registry
-	subServices         []services.Service
-	workflowDonNotifier DonNotifier
-	don2donSharedPeer   p2ptypes.SharedPeer
-	p2pStreamConfig     p2ptypes.StreamConfig
-	metrics             *launcherMetrics
-	localCapMgr         localcapmgr.LocalCapabilityManager
+	lggr                                   logger.Logger
+	myPeerID                               p2ptypes.PeerID
+	peerWrapper                            p2ptypes.PeerWrapper
+	dispatcher                             remotetypes.Dispatcher
+	cachedShims                            cachedShims
+	registry                               *Registry
+	subServices                            []services.Service
+	workflowDonNotifier                    DonNotifier
+	don2donSharedPeer                      p2ptypes.SharedPeer
+	p2pStreamConfig                        p2ptypes.StreamConfig
+	metrics                                *launcherMetrics
+	localCapMgr                            localcapmgr.LocalCapabilityManager
+	triggerRegistrationStatusUpdateTimeOut limits.TimeLimiter
 }
 
 // For V2 capabilities, shims are created once and their config is updated dynamically.
@@ -68,12 +72,6 @@ type cachedShims struct {
 	executableClients  map[string]executable.Client
 	executableServers  map[string]executable.Server
 }
-
-func shimKey(capID string, donID uint32, method string) string {
-	return fmt.Sprintf("%s:%d:%s", capID, donID, method)
-}
-
-// TODO: add metric handler and instrument all the internal log.Error calls
 
 // NewLauncher creates a new capabilities launcher.
 // If peerWrapper is nil, no p2p connections will be managed by the launcher.
@@ -86,6 +84,7 @@ func NewLauncher(
 	dispatcher remotetypes.Dispatcher,
 	registry *Registry,
 	workflowDonNotifier DonNotifier,
+	triggerRegistrationStatusUpdateTimeOut limits.TimeLimiter,
 ) (*launcher, error) {
 	p2pStreamConfig := defaultStreamConfig
 	if streamConfig != nil {
@@ -105,6 +104,7 @@ func NewLauncher(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create launcher metrics: %w", err)
 	}
+
 	return &launcher{
 		lggr:        logger.Named(lggr, "CapabilitiesLauncher"),
 		peerWrapper: peerWrapper,
@@ -116,13 +116,20 @@ func NewLauncher(
 			executableClients:  make(map[string]executable.Client),
 			executableServers:  make(map[string]executable.Server),
 		},
-		registry:            registry,
-		subServices:         []services.Service{},
-		workflowDonNotifier: workflowDonNotifier,
-		don2donSharedPeer:   don2donSharedPeer,
-		p2pStreamConfig:     p2pStreamConfig,
-		metrics:             metrics,
+		registry:                               registry,
+		subServices:                            []services.Service{},
+		workflowDonNotifier:                    workflowDonNotifier,
+		don2donSharedPeer:                      don2donSharedPeer,
+		p2pStreamConfig:                        p2pStreamConfig,
+		metrics:                                metrics,
+		triggerRegistrationStatusUpdateTimeOut: triggerRegistrationStatusUpdateTimeOut,
 	}, nil
+}
+
+// TODO: add metric handler and instrument all the internal log.Error calls
+
+func shimKey(capID string, donID uint32, method string) string {
+	return fmt.Sprintf("%s:%d:%s", capID, donID, method)
 }
 
 // Maintain only necessary Don2Don connections:
@@ -548,6 +555,7 @@ func (w *launcher) addRemoteCapability(ctx context.Context, cid string, capabili
 					"", // empty method name for v1
 					w.dispatcher,
 					w.lggr,
+					w.triggerRegistrationStatusUpdateTimeOut,
 				)
 				w.cachedShims.triggerSubscribers[shimKey] = triggerCap
 			}
@@ -931,7 +939,7 @@ func (w *launcher) addRemoteCapabilityV2(ctx context.Context, capID string, meth
 		if config.RemoteTriggerConfig != nil { // trigger
 			sub, alreadyExists := w.cachedShims.triggerSubscribers[shimKey]
 			if !alreadyExists {
-				sub = remote.NewTriggerSubscriber(capID, method, w.dispatcher, w.lggr)
+				sub = remote.NewTriggerSubscriber(capID, method, w.dispatcher, w.lggr, w.triggerRegistrationStatusUpdateTimeOut)
 				cc.SetTriggerSubscriber(method, sub)
 				// add to cachedShims later, only after startNewShim succeeds
 			}
