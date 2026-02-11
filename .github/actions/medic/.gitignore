@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Build output (runtime-built, not committed)
+dist/
+
+# Coverage reports
+coverage/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+

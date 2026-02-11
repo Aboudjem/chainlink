@@ -1,0 +1,256 @@
+name: Medic - Merge Conflict Resolution
+
+on:
+  schedule:
+    # Run every 30 minutes
+    - cron: '*/30 * * * *'
+  
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Skip actual changes (push, comments, labels)'
+        type: boolean
+        default: false
+      mock-claude:
+        description: 'Skip Claude invocation (use mock response)'
+        type: boolean
+        default: false
+      pr-number:
+        description: 'Test specific PR number (bypasses checker)'
+        type: string
+        required: false
+  
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write        # Push to PR branches
+  pull-requests: write   # Comment on PRs, manage labels
+  id-token: write        # GCP OIDC authentication
+
+# Prevent multiple runs from conflicting
+concurrency:
+  group: medic-${{ github.event.issue.number || 'cron' }}
+  cancel-in-progress: false
+
+jobs:
+  # Build medic action from source (shared by all jobs)
+  build-medic:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: medic-dist
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: '.github/actions/medic/pnpm-lock.yaml'
+      
+      - name: Install dependencies
+        working-directory: .github/actions/medic
+        run: pnpm install --frozen-lockfile
+      
+      - name: Build medic
+        working-directory: .github/actions/medic
+        run: pnpm build
+      
+      - name: Upload built action
+        uses: actions/upload-artifact@v4
+        with:
+          name: medic-dist
+          path: .github/actions/medic/dist/
+          retention-days: 1
+
+  # Parse /medic: commands from PR comments
+  parse-comment:
+    needs: build-medic
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '/medic:')
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.parse.outputs.should_run }}
+      pr_number: ${{ steps.parse.outputs.pr_number }}
+      pr_data: ${{ steps.parse.outputs.pr_data }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Download medic action
+        uses: actions/download-artifact@v4
+        with:
+          name: medic-dist
+          path: .github/actions/medic/dist/
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Parse comment
+        id: parse
+        run: node .github/actions/medic/dist/comment-parser/index.js
+        env:
+          INPUT_GITHUB-TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_COMMENT-BODY: ${{ github.event.comment.body }}
+          INPUT_ISSUE-NUMBER: ${{ github.event.issue.number }}
+          INPUT_COMMENTER-LOGIN: ${{ github.event.comment.user.login }}
+
+  # Check for PRs with merge conflicts (cron/dispatch)
+  check-conflicts:
+    needs: build-medic
+    if: github.event_name != 'issue_comment'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.checker.outputs.matrix || steps.direct-pr.outputs.matrix }}
+      has_conflicts: ${{ steps.checker.outputs.has_conflicts || steps.direct-pr.outputs.has_conflicts }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Download medic action
+        uses: actions/download-artifact@v4
+        with:
+          name: medic-dist
+          path: .github/actions/medic/dist/
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      # If pr-number is provided, bypass checker and use that PR directly
+      - name: Direct PR target (bypass checker)
+        id: direct-pr
+        if: inputs.pr-number != ''
+        run: |
+          echo "Fetching PR #${{ inputs.pr-number }} directly..."
+          PR_DATA=$(gh pr view ${{ inputs.pr-number }} --json number,headRefName,baseRefName,author --jq '{number: .number, headRefName: .headRefName, baseRefName: .baseRefName, author: .author.login, currentAttempts: 0}')
+          echo "PR data: $PR_DATA"
+          MATRIX="{\"include\":[$PR_DATA]}"
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "has_conflicts=true" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Check for conflicts
+        id: checker
+        if: inputs.pr-number == ''
+        run: node .github/actions/medic/dist/checker/index.js
+        env:
+          INPUT_GITHUB-TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Safely select matrix from either parse-comment or check-conflicts
+  select-matrix:
+    needs: [parse-comment, check-conflicts]
+    if: always() && (needs.parse-comment.result == 'success' || needs.check-conflicts.result == 'success')
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      has_work: ${{ steps.select.outputs.has_work }}
+    steps:
+      - name: Select matrix source
+        id: select
+        run: |
+          if [ "${{ github.event_name }}" == "issue_comment" ]; then
+            if [ "${{ needs.parse-comment.outputs.should_run }}" == "true" ]; then
+              echo 'matrix=${{ needs.parse-comment.outputs.pr_data }}' >> $GITHUB_OUTPUT
+              echo "has_work=true" >> $GITHUB_OUTPUT
+              echo "Using PR data from comment parser"
+            else
+              echo 'matrix={"include":[]}' >> $GITHUB_OUTPUT
+              echo "has_work=false" >> $GITHUB_OUTPUT
+              echo "Comment parser indicated should not run"
+            fi
+          else
+            if [ "${{ needs.check-conflicts.outputs.has_conflicts }}" == "true" ]; then
+              echo 'matrix=${{ needs.check-conflicts.outputs.matrix }}' >> $GITHUB_OUTPUT
+              echo "has_work=true" >> $GITHUB_OUTPUT
+              echo "Using PR data from conflict checker"
+            else
+              echo 'matrix={"include":[]}' >> $GITHUB_OUTPUT
+              echo "has_work=false" >> $GITHUB_OUTPUT
+              echo "No conflicting PRs found"
+            fi
+          fi
+
+  # Fix merge conflicts using Claude
+  fix-conflicts:
+    needs: [build-medic, select-matrix]
+    if: needs.select-matrix.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.select-matrix.outputs.matrix) }}
+      max-parallel: 3
+      fail-fast: false
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.headRefName }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Download medic action
+        uses: actions/download-artifact@v4
+        with:
+          name: medic-dist
+          path: .github/actions/medic/dist/
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      # GCP Authentication for Claude
+      - name: Authenticate to GCP
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/798489629806/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'intern4all-agent@dsa-prod-intern4all-agents.iam.gserviceaccount.com'
+      
+      # Install Claude CLI
+      - name: Install Claude CLI
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+      
+      # Install gitleaks for secret scanning
+      - name: Install gitleaks
+        run: |
+          wget -q https://github.com/gitleaks/gitleaks/releases/download/v8.18.1/gitleaks_8.18.1_linux_x64.tar.gz
+          tar -xzf gitleaks_8.18.1_linux_x64.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+          gitleaks version
+      
+      - name: Fix merge conflicts
+        id: fixer
+        run: node .github/actions/medic/dist/fixer/index.js
+        env:
+          # GitHub
+          INPUT_GITHUB-TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_PR-NUMBER: ${{ matrix.number }}
+          INPUT_PR-BRANCH: ${{ matrix.headRefName }}
+          INPUT_BASE-BRANCH: ${{ matrix.baseRefName }}
+          INPUT_CURRENT-ATTEMPTS: ${{ matrix.currentAttempts }}
+          INPUT_DRY-RUN: ${{ inputs.dry-run || 'false' }}
+          INPUT_MOCK-CLAUDE: ${{ inputs.mock-claude || 'false' }}
+          # Claude via GCP Vertex AI
+          CLAUDE_CODE_USE_VERTEX: '1'
+          CLOUD_ML_REGION: 'us-east5'
+          ANTHROPIC_VERTEX_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          ANTHROPIC_MODEL: 'claude-sonnet-4@20250514'
+          # Disable features that don't work in CI
+          CI: 'true'
+          NO_COLOR: '1'
+          DISABLE_PROMPT_CACHING: '1'
+
