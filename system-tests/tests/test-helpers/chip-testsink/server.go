@@ -120,6 +120,23 @@ func (s *Server) Publish(ctx context.Context, event *pb.CloudEvent) (*chippb.Pub
 	return s.cfg.PublishFunc(ctx, event)
 }
 
+// PublishBatch implements chippb.ChipIngressServer.PublishBatch.
+// It delegates each event in the batch to the configured PublishFunc,
+// mirroring how the real ChIP Ingress processes batches atomically.
+func (s *Server) PublishBatch(ctx context.Context, batch *chippb.CloudEventBatch) (*chippb.PublishResponse, error) {
+	if batch == nil {
+		return &chippb.PublishResponse{}, nil
+	}
+
+	for _, event := range batch.Events {
+		if _, err := s.Publish(ctx, event); err != nil {
+			return nil, fmt.Errorf("publish batch: event %s: %w", event.GetId(), err)
+		}
+	}
+
+	return &chippb.PublishResponse{}, nil
+}
+
 func (s *Server) Shutdown(ctx context.Context) {
 	s.grpcServer.GracefulStop()
 	log.Println("[chip-testsink] Server shutdown")
