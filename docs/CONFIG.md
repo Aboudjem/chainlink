@@ -2487,9 +2487,10 @@ ChipIngressInsecureConnection disables TLS when connecting to CHIP Ingress.
 
 ### ChipIngressBatchEmitterEnabled
 ```toml
-ChipIngressBatchEmitterEnabled = true # Default
+ChipIngressBatchEmitterEnabled = false # Default
 ```
-ChipIngressBatchEmitterEnabled enables batching for chip-ingress events. When false, events are sent individually (legacy behavior).
+ChipIngressBatchEmitterEnabled enables batching for chip-ingress events.
+When false, events are sent individually (legacy behavior).
 
 ### HeartbeatInterval
 ```toml
