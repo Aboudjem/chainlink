@@ -305,10 +305,8 @@ func (m *donConnectionManager) getHandler(method string) (handlers.Handler, erro
 			return h, nil // supports legacy single-handler case
 		}
 	}
-
 	serviceName := strings.Split(method, ".")[0]
-
-	// Special case for methods that are not migrated to service-based schema yet.
+	// Special case for legacy methods - default to "workflows" service.
 	if !strings.Contains(method, ".") {
 		serviceName = "workflows"
 	}
