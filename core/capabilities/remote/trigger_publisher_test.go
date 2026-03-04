@@ -646,13 +646,6 @@ func TestTriggerPublisher_ResendBehavior_MultiTriggerBatch(t *testing.T) {
 		require.NoError(t, publisher.Close())
 	}()
 
-	// Register two triggers
-	for _, trig := range []string{"triggerA", "triggerB"} {
-		reg := newRegisterTriggerMessageWithTriggerID(t, workflowDONID, peers[0], trig)
-		publisher.Receive(ctx, reg)
-		<-underlying.registrationsCh
-	}
-
 	var mu sync.Mutex
 	sendRecords := make([]struct {
 		peer       p2ptypes.PeerID
@@ -667,7 +660,12 @@ func TestTriggerPublisher_ResendBehavior_MultiTriggerBatch(t *testing.T) {
 
 		peer := args.Get(0).(p2ptypes.PeerID)
 		msg := args.Get(1).(*remotetypes.MessageBody)
-		meta := msg.Metadata.(*remotetypes.MessageBody_TriggerEventMetadata)
+
+		// Check if Metadata is of type *remotetypes.MessageBody_TriggerEventMetadata before using it
+		meta, ok := msg.Metadata.(*remotetypes.MessageBody_TriggerEventMetadata)
+		if !ok || meta.TriggerEventMetadata == nil {
+			return
+		}
 
 		sendRecords = append(sendRecords, struct {
 			peer       p2ptypes.PeerID
@@ -678,7 +676,14 @@ func TestTriggerPublisher_ResendBehavior_MultiTriggerBatch(t *testing.T) {
 		})
 
 		sendCh <- struct{}{}
-	}).Return(nil)
+	}).Maybe().Return(nil)
+
+	// Register two triggers
+	for _, trig := range []string{"triggerA", "triggerB"} {
+		reg := newRegisterTriggerMessageWithTriggerID(t, workflowDONID, peers[0], trig)
+		publisher.Receive(ctx, reg)
+		<-underlying.registrationsCh
+	}
 
 	t.Run("initial send to both peers with both triggerIDs", func(t *testing.T) {
 		mu.Lock()
